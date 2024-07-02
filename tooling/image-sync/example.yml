@@ -1,0 +1,4 @@
+
+images:
+  - quay.io/foo-bar/baz
+numberOfTags: 10
