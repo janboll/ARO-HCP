@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/containers/azcontainerregistry"
@@ -111,6 +114,7 @@ func (q *QuayRegistry) GetTags(ctx context.Context, image string) ([]string, err
 // AzureContainerRegistry implements ACR Repository access
 type AzureContainerRegistry struct {
 	acrName      string
+	credential   *azidentity.DefaultAzureCredential
 	acrClient    *azcontainerregistry.Client
 	numberOfTags int
 	skipLatest   bool
@@ -122,6 +126,7 @@ func NewAzureContainerRegistry(cfg *SyncConfig) *AzureContainerRegistry {
 	if err != nil {
 		Log().Fatalf("failed to obtain a credential: %v", err)
 	}
+
 	client, err := azcontainerregistry.NewClient(cfg.AcrRegistry, cred, nil)
 	if err != nil {
 		Log().Fatalf("failed to create client: %v", err)
@@ -130,9 +135,53 @@ func NewAzureContainerRegistry(cfg *SyncConfig) *AzureContainerRegistry {
 	return &AzureContainerRegistry{
 		acrName:      cfg.AcrRegistry,
 		acrClient:    client,
+		credential:   cred,
 		numberOfTags: cfg.NumberOfTags,
 		skipLatest:   cfg.SkipLatest,
 	}
+}
+
+type AuthSecret struct {
+	RefreshToken string `json:"refresh_token"`
+}
+
+func (a *AzureContainerRegistry) GetPullSecret(ctx context.Context) (*AuthSecret, error) {
+	accessToken, err := a.credential.GetToken(ctx, policy.TokenRequestOptions{Scopes: []string{"https://management.core.windows.net//.default"}})
+
+	path := fmt.Sprintf("%s/oauth2/exchange/", a.acrName)
+
+	form := url.Values{}
+	form.Add("grant_type", "access_token")
+	form.Add("service", "")
+	form.Add("tenant", "")
+	form.Add("access_token", accessToken.Token)
+
+	Log().Debugw("Sending request", "path", path)
+	req, err := http.NewRequestWithContext(ctx, "POST", path, strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status code %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var authSecret AuthSecret
+
+	json.Unmarshal(body, &authSecret)
+
+	return &authSecret, nil
 }
 
 // EnsureRepositoryExists ensures that the repository exists
