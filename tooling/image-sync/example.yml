@@ -1,4 +1,6 @@
 
 images:
-  - quay.io/foo-bar/baz
+  - app-sre/go-qontract-reconcile
 numberOfTags: 10
+quaySecretFile: /tmp/quay-secret
+acrRegistry: https://devarohcp.azurecr.io
