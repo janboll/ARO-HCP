@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -38,22 +39,23 @@ type QuayRegistry struct {
 	httpclient   *http.Client
 	baseUrl      string
 	numberOftags int
-	skipLatest   bool
 }
 
 // NewQuayRegistry creates a new QuayRegistry access client
 func NewQuayRegistry(cfg *SyncConfig, bearerToken string) *QuayRegistry {
-
+	secretBytes, err := os.ReadFile(cfg.QuaySecretFile)
+	if err != nil {
+		Log().Fatalf("failed to read secret file: %v", err)
+	}
 	return &QuayRegistry{
 		httpclient: &http.Client{Timeout: time.Duration(cfg.RequestTimeout) * time.Second,
 			Transport: &AuthedTransport{
-				Key:     "Bearer " + cfg.QuaySecretFile,
+				Key:     "Bearer " + string(secretBytes),
 				Wrapped: http.DefaultTransport,
 			},
 		},
 		baseUrl:      "https://quay.io",
 		numberOftags: cfg.NumberOfTags,
-		skipLatest:   cfg.SkipLatest,
 	}
 }
 
@@ -98,8 +100,7 @@ func (q *QuayRegistry) GetTags(ctx context.Context, image string) ([]string, err
 	var tags []string
 
 	for _, tag := range tagsResponse.Tags {
-
-		if tag.Name == "latest" && q.skipLatest {
+		if tag.Name == "latest" {
 			continue
 		}
 		tags = append(tags, tag.Name)
@@ -117,7 +118,7 @@ type AzureContainerRegistry struct {
 	credential   *azidentity.DefaultAzureCredential
 	acrClient    *azcontainerregistry.Client
 	numberOfTags int
-	skipLatest   bool
+	tenantId     string
 }
 
 // NewAzureContainerRegistry creates a new AzureContainerRegistry access client
@@ -127,7 +128,7 @@ func NewAzureContainerRegistry(cfg *SyncConfig) *AzureContainerRegistry {
 		Log().Fatalf("failed to obtain a credential: %v", err)
 	}
 
-	client, err := azcontainerregistry.NewClient(cfg.AcrRegistry, cred, nil)
+	client, err := azcontainerregistry.NewClient(fmt.Sprintf("https://%s", cfg.AcrRegistry), cred, nil)
 	if err != nil {
 		Log().Fatalf("failed to create client: %v", err)
 	}
@@ -137,7 +138,7 @@ func NewAzureContainerRegistry(cfg *SyncConfig) *AzureContainerRegistry {
 		acrClient:    client,
 		credential:   cred,
 		numberOfTags: cfg.NumberOfTags,
-		skipLatest:   cfg.SkipLatest,
+		tenantId:     cfg.TenantId,
 	}
 }
 
@@ -148,12 +149,12 @@ type AuthSecret struct {
 func (a *AzureContainerRegistry) GetPullSecret(ctx context.Context) (*AuthSecret, error) {
 	accessToken, err := a.credential.GetToken(ctx, policy.TokenRequestOptions{Scopes: []string{"https://management.core.windows.net//.default"}})
 
-	path := fmt.Sprintf("%s/oauth2/exchange/", a.acrName)
+	path := fmt.Sprintf("https://%s/oauth2/exchange/", a.acrName)
 
 	form := url.Values{}
 	form.Add("grant_type", "access_token")
-	form.Add("service", "")
-	form.Add("tenant", "")
+	form.Add("service", a.acrName)
+	form.Add("tenant", a.tenantId)
 	form.Add("access_token", accessToken.Token)
 
 	Log().Debugw("Sending request", "path", path)
@@ -214,7 +215,7 @@ func (a *AzureContainerRegistry) GetTags(ctx context.Context, repository string)
 			return nil, fmt.Errorf("failed to advance page: %v", err)
 		}
 		for _, v := range page.Tags {
-			if *v.Name == "latest" && a.skipLatest {
+			if *v.Name == "latest" {
 				continue
 			}
 			tags = append(tags, *v.Name)
