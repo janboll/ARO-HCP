@@ -78,6 +78,7 @@ type NormalizedLogLine struct {
 	Namespace     string    `kusto:"namespace_name"`
 	ContainerName string    `kusto:"container_name"`
 	Timestamp     time.Time `kusto:"timestamp"`
+	TableName     string    // source Kusto table, set by the gatherer pipeline
 }
 
 // GathererOptions represents the options for the Gatherer
@@ -222,7 +223,7 @@ func NewGatherer(queryClient QueryClientInterface, outputFunc RowOutputFunc, out
 		outputFunc:    outputFunc,
 		outputOptions: outputOptions,
 		opts:          opts,
-		infraLogsOnly: false,
+		infraLogsOnly: opts.GatherInfraLogs,
 	}
 }
 
@@ -440,10 +441,10 @@ func (g *Gatherer) executeQueryAndConvert(ctx context.Context, query *kusto.Conf
 
 func (g *Gatherer) queryAndWriteToFile(ctx context.Context, queryType QueryType, queries []*kusto.ConfigurableQuery) error {
 	logger := logr.FromContextOrDiscard(ctx)
-	queryOutputChannel := make(chan azkquery.Row)
+	queryOutputChannel := make(chan TaggedRow)
 	logLineChan := make(chan *NormalizedLogLine)
 
-	logger.V(6).Info("Executing query", "queryType", queryType, "queries", len(queries), "queries", queries)
+	logger.V(6).Info("Executing query", "queryType", queryType, "queries", len(queries))
 
 	queryGroup, queryCtx := errgroup.WithContext(ctx)
 	queryGroup.Go(func() error {
@@ -468,23 +469,24 @@ func (g *Gatherer) queryAndWriteToFile(ctx context.Context, queryType QueryType,
 	return nil
 }
 
-func (g *Gatherer) convertRows(ctx context.Context, rowChannel <-chan azkquery.Row, outPutChannel chan<- *NormalizedLogLine) error {
+func (g *Gatherer) convertRows(ctx context.Context, rowChannel <-chan TaggedRow, outPutChannel chan<- *NormalizedLogLine) error {
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case row, ok := <-rowChannel:
+		case tagged, ok := <-rowChannel:
 			if !ok {
 				return nil
 			}
 			normalizedLogLine := &NormalizedLogLine{}
-			if err := row.ToStruct(normalizedLogLine); err != nil {
+			if err := tagged.Row.ToStruct(normalizedLogLine); err != nil {
 				return fmt.Errorf("failed to convert row to struct: %w", err)
 			}
+			normalizedLogLine.TableName = tagged.QueryName
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case outPutChannel <- normalizedLogLine: // now interruptible
+			case outPutChannel <- normalizedLogLine:
 			}
 		}
 	}

@@ -171,8 +171,7 @@ func GetKubeSystemHostedControlPlaneLogsQuery(opts *CompletedQueryOptions) []*ku
 }
 
 func queryAndWriteToFile(ctx context.Context, opts *CompletedQueryOptions, targetDirectory string, castFunction func(input azkquery.Row) (*LegacyNormalizedLogLine, error), queries []*kusto.ConfigurableQuery) error {
-	// logger := logr.FromContextOrDiscard(ctx)
-	queryOutputChannel := make(chan azkquery.Row)
+	queryOutputChannel := make(chan mustgather.TaggedRow)
 
 	queryGroup := new(errgroup.Group)
 	queryGroup.Go(func() error {
@@ -194,11 +193,11 @@ func queryAndWriteToFile(ctx context.Context, opts *CompletedQueryOptions, targe
 	return nil
 }
 
-func writeNormalizedLogsToFile(outputChannel chan azkquery.Row, castFunction func(input azkquery.Row) (*LegacyNormalizedLogLine, error), outputPath string, directory string) error {
+func writeNormalizedLogsToFile(outputChannel chan mustgather.TaggedRow, castFunction func(input azkquery.Row) (*LegacyNormalizedLogLine, error), outputPath string, directory string) error {
 	openedFiles := make(map[string]*os.File)
 	var allErrors error
-	for row := range outputChannel {
-		normalizedRow, err := castFunction(row)
+	for tagged := range outputChannel {
+		normalizedRow, err := castFunction(tagged.Row)
 		if err != nil {
 			return fmt.Errorf("failed to cast row: %w", err)
 		}

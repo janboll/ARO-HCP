@@ -27,9 +27,15 @@ import (
 	"github.com/Azure/ARO-HCP/tooling/hcpctl/pkg/kusto"
 )
 
+// TaggedRow pairs a raw Kusto row with the name of the query that produced it.
+type TaggedRow struct {
+	Row       azkquery.Row
+	QueryName string
+}
+
 // QueryClientInterface defines the interface for querying data
 type QueryClientInterface interface {
-	ConcurrentQueries(ctx context.Context, queries []*kusto.ConfigurableQuery, outputChannel chan<- azkquery.Row) error
+	ConcurrentQueries(ctx context.Context, queries []*kusto.ConfigurableQuery, outputChannel chan<- TaggedRow) error
 	Close() error
 	ExecutePreconfiguredQuery(ctx context.Context, query *kusto.ConfigurableQuery, outputChannel chan<- azkquery.Row) (*kusto.QueryResult, error)
 }
@@ -61,24 +67,52 @@ func NewQueryClientWithFileWriter(client kusto.KustoClient, queryTimeout time.Du
 	}
 }
 
-func (q *QueryClient) ConcurrentQueries(ctx context.Context, queries []*kusto.ConfigurableQuery, outputChannel chan<- azkquery.Row) error {
+func (q *QueryClient) ConcurrentQueries(ctx context.Context, queries []*kusto.ConfigurableQuery, outputChannel chan<- TaggedRow) error {
 	logger := logr.FromContextOrDiscard(ctx)
 
 	queryGroup, queryCtx := errgroup.WithContext(ctx)
 	for _, query := range queries {
 		queryGroup.Go(func() error {
-			result, err := q.Client.ExecutePreconfiguredQuery(queryCtx, query, outputChannel)
-			if err != nil {
-				logger.Error(err, "Query failed", "name", query.Name)
-				return fmt.Errorf("failed to execute query: %w", err)
-			}
-			if q.FileWriter != nil {
-				err = q.FileWriter.WriteFile(q.OutputPath, fmt.Sprintf("%s.json", query.Name), result)
+			rowChan := make(chan azkquery.Row)
+
+			innerGroup, innerCtx := errgroup.WithContext(queryCtx)
+
+			// Execute the query, writing raw rows to the intermediate channel.
+			innerGroup.Go(func() error {
+				defer close(rowChan)
+				result, err := q.Client.ExecutePreconfiguredQuery(innerCtx, query, rowChan)
 				if err != nil {
-					return fmt.Errorf("failed to write query result to file: %w", err)
+					logger.Error(err, "Query failed", "name", query.Name)
+					return fmt.Errorf("failed to execute query: %w", err)
 				}
-			}
-			return nil
+				if q.FileWriter != nil {
+					if err := q.FileWriter.WriteFile(q.OutputPath, fmt.Sprintf("%s.json", query.Name), result); err != nil {
+						return fmt.Errorf("failed to write query result to file: %w", err)
+					}
+				}
+				return nil
+			})
+
+			// Forward rows tagged with the query name.
+			innerGroup.Go(func() error {
+				for {
+					select {
+					case <-innerCtx.Done():
+						return innerCtx.Err()
+					case row, ok := <-rowChan:
+						if !ok {
+							return nil
+						}
+						select {
+						case <-innerCtx.Done():
+							return innerCtx.Err()
+						case outputChannel <- TaggedRow{Row: row, QueryName: query.Name}:
+						}
+					}
+				}
+			})
+
+			return innerGroup.Wait()
 		})
 	}
 

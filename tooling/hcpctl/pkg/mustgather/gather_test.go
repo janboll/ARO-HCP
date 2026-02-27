@@ -36,7 +36,7 @@ type MockQueryClient struct {
 	mock.Mock
 }
 
-func (m *MockQueryClient) ConcurrentQueries(ctx context.Context, queries []*kusto.ConfigurableQuery, outputChannel chan<- azkquery.Row) error {
+func (m *MockQueryClient) ConcurrentQueries(ctx context.Context, queries []*kusto.ConfigurableQuery, outputChannel chan<- TaggedRow) error {
 	args := m.Called(ctx, queries, outputChannel)
 	return args.Error(0)
 }
