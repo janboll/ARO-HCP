@@ -18,9 +18,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -37,6 +39,7 @@ import (
 const (
 	MonitorTranslatorControllerName = "MonitorTranslator"
 	fieldManager                    = "mgmt-agent-monitor-translator"
+	finalizerName                   = "mgmt-agent.aro-hcp.azure.com/monitor-translator"
 )
 
 var (
@@ -225,6 +228,24 @@ func (c *MonitorTranslatorController) syncHandler(ctx context.Context, key strin
 		return fmt.Errorf("expected *unstructured.Unstructured, got %T", obj)
 	}
 
+	if !source.GetDeletionTimestamp().IsZero() {
+		if err := c.dynamicClient.Resource(targetGVR).Namespace(namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("failed to delete translated %s %s/%s: %w", resource, namespace, name, err)
+		}
+		logger.V(4).Info("Deleted translated resource for terminating source")
+		if err := c.removeFinalizer(ctx, sourceGVR, source); err != nil {
+			return fmt.Errorf("failed to remove finalizer from %s %s/%s: %w", resource, namespace, name, err)
+		}
+		return nil
+	}
+
+	if !slices.Contains(source.GetFinalizers(), finalizerName) {
+		if err := c.addFinalizer(ctx, sourceGVR, source); err != nil {
+			return fmt.Errorf("failed to add finalizer to %s %s/%s: %w", resource, namespace, name, err)
+		}
+		return nil
+	}
+
 	translated := Translate(source, sourceGVR, targetGVR)
 	if err := c.applyResource(ctx, targetGVR, translated); err != nil {
 		return fmt.Errorf("failed to apply translated %s %s/%s: %w", resource, namespace, name, err)
@@ -232,6 +253,33 @@ func (c *MonitorTranslatorController) syncHandler(ctx context.Context, key strin
 
 	logger.V(4).Info("Translated monitor resource")
 	return nil
+}
+
+func (c *MonitorTranslatorController) patchFinalizers(ctx context.Context, gvr schema.GroupVersionResource, namespace, name string, finalizers []string) error {
+	patch, err := json.Marshal(map[string]any{
+		"metadata": map[string]any{
+			"finalizers": finalizers,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to marshal finalizer patch: %w", err)
+	}
+	_, err = c.dynamicClient.Resource(gvr).Namespace(namespace).Patch(
+		ctx, name, types.MergePatchType, patch, metav1.PatchOptions{},
+	)
+	return err
+}
+
+func (c *MonitorTranslatorController) addFinalizer(ctx context.Context, gvr schema.GroupVersionResource, source *unstructured.Unstructured) error {
+	finalizers := append(source.GetFinalizers(), finalizerName)
+	return c.patchFinalizers(ctx, gvr, source.GetNamespace(), source.GetName(), finalizers)
+}
+
+func (c *MonitorTranslatorController) removeFinalizer(ctx context.Context, gvr schema.GroupVersionResource, source *unstructured.Unstructured) error {
+	finalizers := slices.DeleteFunc(source.GetFinalizers(), func(s string) bool {
+		return s == finalizerName
+	})
+	return c.patchFinalizers(ctx, gvr, source.GetNamespace(), source.GetName(), finalizers)
 }
 
 func (c *MonitorTranslatorController) applyResource(ctx context.Context, gvr schema.GroupVersionResource, desired *unstructured.Unstructured) error {

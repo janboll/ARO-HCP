@@ -287,6 +287,7 @@ rules:
   - get
   - list
   - watch
+  - update
 - apiGroups:
   - apps
   resources:
@@ -328,6 +329,7 @@ rules:
   - watch
   - create
   - patch
+  - update
 - apiGroups:
   - azmonitoring.coreos.com
   resources:
@@ -339,6 +341,7 @@ rules:
   - watch
   - create
   - patch
+  - delete
 - apiGroups:
   - mgmtagent.aro-hcp.azure.com
   resources:
@@ -354,6 +357,17 @@ rules:
   verbs:
   - get
   - patch
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - networkpolicies
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - patch
+  - delete
 - apiGroups:
   - metrics.k8s.io
   resources:
@@ -472,6 +486,7 @@ spec:
         - "--log-verbosity=2"
         - "--node-health-configmap=mgmt-agent-node-health"
         - "--node-health-config-key=config.yaml"
+        - "--monitoring-api-group=monitoring.coreos.com"
         image: "arohcpsvcdev.azurecr.io/mgmt-agent@sha256:1234567890"
         name: mgmt-agent-controller
         env:
